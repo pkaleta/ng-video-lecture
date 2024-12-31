@@ -3,14 +3,17 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # hyperparameters
-batch_size = 32  # how many independent sequences will we process in parallel?
-block_size = 8  # what is the maximum context length for predictions?
+batch_size = 64  # how many independent sequences will we process in parallel?
+block_size = 256  # what is the maximum context length for predictions?
 max_iters = 5000
-eval_interval = 300
-learning_rate = 1e-3
+eval_interval = 500
+learning_rate = 3e-4
 device = "cuda" if torch.cuda.is_available() else "cpu"
 eval_iters = 200
-n_embd = 32
+n_embd = 64
+n_heads = 4
+n_blocks = 4
+dropout = 0.2
 # ------------
 
 torch.manual_seed(1337)
@@ -74,6 +77,7 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.shape  # (B, T, C), where C == head_size
@@ -83,6 +87,7 @@ class Head(nn.Module):
         k = self.key(x)  # (B, T, head_size)
         wei = q @ k.transpose(-1, -2) * C**-0.5  # (B, T, 16) @ (B, 16, T) --> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
+        wei = self.dropout(wei)
 
         # print(wei)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
@@ -94,24 +99,47 @@ class Head(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, head_size):
+    def __init__(self, n_heads, head_size):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return torch.cat([head(x) for head in self.heads], dim=-1)
+        out = torch.cat(
+            [head(x) for head in self.heads], dim=-1
+        )  # (B, T, n_embd = n_heads * head_size)
+        out = self.proj(out)  # (B, T, n_embd)
+        out = self.dropout(out)
+        return out
 
 
 class FeedForward(nn.Module):
     def __init__(self):
         super().__init__()
         self.ffwd = nn.Sequential(
-            nn.Linear(n_embd, n_embd),
+            nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
         return self.ffwd(x)
+
+
+class Block(nn.Module):
+    def __init__(self, n_embd, n_heads):
+        super().__init__()
+        self.sa_heads = MultiHeadAttention(n_heads=n_heads, head_size=n_embd // n_heads)
+        self.ffwd = FeedForward()
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        x = x + self.sa_heads(self.ln1(x))  # apply self-attention, (B, T, C)
+        x = x + self.ffwd(self.ln2(x))  # apply linear MLP, (B, T, C)
+        return x
 
 
 # super simple bigram model
@@ -121,8 +149,10 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_heads = MultiHeadAttention(num_heads=4, head_size=n_embd // 4)
-        self.ffwd = FeedForward()
+        self.blocks = nn.Sequential(
+            *[Block(n_embd=n_embd, n_heads=n_heads) for _ in range(n_blocks)]
+        )
+        self.final_ln = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -133,8 +163,8 @@ class BigramLanguageModel(nn.Module):
         pos_embs = self.position_embedding_table(torch.arange(T, device=device))
         x = token_embs + pos_embs
         # print(x.shape)
-        x = self.sa_heads(x)  # apply attention, (B, T, C)
-        x = self.ffwd(x)  # apply linear MLP, (B, T, C)
+        x = self.blocks(x)
+        x = self.final_ln(x)
         logits = self.lm_head(x)  # (B,T,vocab_size)
 
         if targets is None:
