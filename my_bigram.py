@@ -3,14 +3,14 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # hyperparameters
-batch_size = 64  # how many independent sequences will we process in parallel?
-block_size = 256  # what is the maximum context length for predictions?
+batch_size = 32  # how many independent sequences will we process in parallel?
+block_size = 8  # what is the maximum context length for predictions?
 max_iters = 5000
-eval_interval = 500
-learning_rate = 3e-4
+eval_interval = 300
+learning_rate = 1e-3
 device = "cuda" if torch.cuda.is_available() else "cpu"
 eval_iters = 200
-n_embd = 64
+n_embd = 32
 n_heads = 4
 n_blocks = 4
 dropout = 0.2
@@ -77,17 +77,17 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
-        self.dropout = nn.Dropout(dropout)
+        # self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        B, T, C = x.shape  # (B, T, C), where C == head_size
+        B, T, C = x.shape  # (B, T, C=32)
 
         # Self-attention
-        q = self.query(x)  # (B, T, head_size)
-        k = self.key(x)  # (B, T, head_size)
-        wei = q @ k.transpose(-1, -2) * C**-0.5  # (B, T, 16) @ (B, 16, T) --> (B, T, T)
+        q = self.query(x)  # (B, T, C)
+        k = self.key(x)  # (B, T, C)
+        wei = q @ k.transpose(-1, -2) * C**-0.5  # (B, T, C) @ (B, C, T) --> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
-        wei = self.dropout(wei)
+        # wei = self.dropout(wei)
 
         # print(wei)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
@@ -103,14 +103,14 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
-        self.dropout = nn.Dropout(dropout)
+        # self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat(
             [head(x) for head in self.heads], dim=-1
         )  # (B, T, n_embd = n_heads * head_size)
         out = self.proj(out)  # (B, T, n_embd)
-        out = self.dropout(out)
+        # out = self.dropout(out)
         return out
 
 
@@ -121,7 +121,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout),
+            # nn.Dropout(dropout),
         )
 
     def forward(self, x):
